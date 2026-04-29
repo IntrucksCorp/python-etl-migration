@@ -1,12 +1,14 @@
 """
 Maps Nowcerts TasksList → Supabase `cases` table.
 
-Field mapping:
-  title        → title
-  category     → subcategory
-  description  → description
-  insuredId    → client_id
-  status       → status (mapped)
+Verified field names from inspection:
+  databaseId        → _nowcerts_id
+  insuredDatabaseId → FK to profile
+  title             → title
+  categoryName      → subcategory  (not category)
+  description       → description
+  status            → status (mapped)
+  dueDate           → due_date
 """
 from __future__ import annotations
 
@@ -46,9 +48,9 @@ def transform_cases(
 
         record: dict[str, Any] = {
             "client_id": profile_id,
-            "title": safe_str(task.get("title") or task.get("subject")),
-            "subcategory": safe_str(task.get("category")),
-            "description": safe_str(task.get("description") or task.get("notes")),
+            "title": safe_str(task.get("title")),
+            "subcategory": safe_str(task.get("categoryName")),   # not category
+            "description": safe_str(task.get("description")),
             "status": status,
             "due_date": parse_date(task.get("dueDate")),
             "org_id": TARGET_ORG_ID or None,

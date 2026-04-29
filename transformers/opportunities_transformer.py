@@ -1,14 +1,16 @@
 """
 Maps Nowcerts OpportunitiesList → Supabase `opportunities` table.
 
-Field mapping:
-  isRenewal          → is_renewal       (bool; if no renewal checkbox → new sale)
-  neededByDate       → needed_by_date   (date)
-  opportunityStage   → status           (mapped to enum)
-  agencyCommission   → commission_estimate (float)
-  assignedTo         → assigned_agent_id  (lookup needed post-migration)
-  description        → notes             (vigencia de la póliza)
-  lineOfBusiness     → line_of_business  (array strings)
+Verified field names from inspection:
+  id                    → _nowcerts_id
+  insuredDatabaseId     → FK to profile
+  createdFromRenewal    → is_renewal   (not isRenewal)
+  neededBy              → needed_by_date  (not neededByDate)
+  opportunityStageName  → status (mapped to enum)
+  agencyCommission      → commission_estimate
+  description           → notes
+  lineOfBusinessName    → line_of_business (single string, not array)
+  assignedTo            → list of strings — no UUID available, left null
 """
 from __future__ import annotations
 
@@ -20,7 +22,6 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Map Nowcerts opportunity stage → Trucker status enum
 _STAGE_MAP: dict[str, str] = {
     "new": "prospect",
     "contacted": "open",
@@ -56,31 +57,24 @@ def transform_opportunities(
         profile_id = nowcerts_to_supabase_profile.get(insured_id or "")
 
         if not profile_id:
-            logger.warning("Opportunity %s — no matching profile, skipping", opp.get("databaseId"))
+            logger.warning("Opportunity %s — no matching profile, skipping", opp.get("id"))
             continue
 
-        is_renewal = safe_bool(opp.get("isRenewal"))
-
-        lob_raw = opp.get("lineOfBusiness")
-        line_of_business: list[str] = []
-        if isinstance(lob_raw, list):
-            line_of_business = [safe_str(x) for x in lob_raw if x]
-        elif isinstance(lob_raw, str) and lob_raw.strip():
-            line_of_business = [lob_raw.strip()]
+        # lineOfBusinessName is a single string in OpportunitiesList
+        lob = safe_str(opp.get("lineOfBusinessName"))
+        line_of_business = [lob] if lob else None
 
         record: dict[str, Any] = {
-            "is_renewal": is_renewal if is_renewal is not None else False,
-            "needed_by_date": parse_date(opp.get("neededByDate") or opp.get("effectiveDate")),
-            "status": _map_stage(opp.get("opportunityStage")),
+            "is_renewal": safe_bool(opp.get("createdFromRenewal")) or False,
+            "needed_by_date": parse_date(opp.get("neededBy")),          # not neededByDate
+            "status": _map_stage(opp.get("opportunityStageName")),      # not opportunityStage
             "commission_estimate": safe_float(opp.get("agencyCommission")),
-            "line_of_business": line_of_business if line_of_business else None,
+            "line_of_business": line_of_business,
             "notes": safe_str(opp.get("description")),
+            "assigned_agent_id": None,  # assignedTo is list of names, no UUID available
             "org_id": TARGET_ORG_ID or None,
-            # relationships
             "_profile_id": profile_id,
-            "_nowcerts_id": safe_str(opp.get("databaseId")),
-            # assigned_agent_id requires a separate agent lookup — left null for now
-            "assigned_agent_id": None,
+            "_nowcerts_id": safe_str(opp.get("id")),
         }
         result.append(record)
 

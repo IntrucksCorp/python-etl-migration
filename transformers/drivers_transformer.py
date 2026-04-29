@@ -1,17 +1,16 @@
 """
 Maps Nowcerts DriverList → Supabase `drivers` table.
 
-Field mapping:
-  firstName + lastName  → name
-  dlNumber              → license_number
-  dlState               → license_state
-  licenseClass          → license_type
-  dateOfBirth           → date_of_birth   (date)
-  hireDate              → hire_date       (date)
-  licenseIssueDate      → (stored in notes for now — no direct field in drivers)
-  excluded (checkbox)   → owner           (bool: excluded = owner in Nowcerts)
-  dlStatus              → dl_status       (stored in notes)
-  radioOperacion        → (stored in notes via custom field)
+Verified field names from inspection:
+  id                → _nowcerts_id
+  insuredDatabaseId → FK to profile
+  firstName, lastName → name
+  licenseNumber     → license_number  (not dlNumber)
+  licenseState      → license_state   (not dlState)
+  driverLicenseClass → license_type   (not licenseClass)
+  dateOfBirth       → date_of_birth
+  hireDate          → hire_date
+  excluded          → owner (bool)
 """
 from __future__ import annotations
 
@@ -35,33 +34,25 @@ def transform_drivers(
         profile_id = nowcerts_to_supabase_profile.get(insured_id or "")
 
         if not profile_id:
-            logger.warning("Driver %s — no matching profile for insuredId=%s, skipping", d.get("databaseId"), insured_id)
+            logger.warning("Driver %s — no matching profile for insuredId=%s, skipping", d.get("id"), insured_id)
             continue
 
         first = safe_str(d.get("firstName") or "")
         last = safe_str(d.get("lastName") or "")
         name = " ".join(filter(None, [first, last])) or None
 
-        # Excluded checkbox in Nowcerts corresponds to "owner" in Trucker
-        is_owner = safe_bool(d.get("excluded"))
-
         record: dict[str, Any] = {
             "name": name,
-            "license_number": safe_str(d.get("dlNumber")),
-            "license_state": safe_str(d.get("dlState")),
-            "license_type": safe_str(d.get("licenseClass")),
+            "license_number": safe_str(d.get("licenseNumber")),       # not dlNumber
+            "license_state": safe_str(d.get("licenseState")),         # not dlState
+            "license_type": safe_str(d.get("driverLicenseClass")),    # not licenseClass
             "date_of_birth": parse_date(d.get("dateOfBirth")),
             "hire_date": parse_date(d.get("hireDate")),
-            "owner": is_owner,
+            "owner": safe_bool(d.get("excluded")),
             "status": "active",
             "org_id": TARGET_ORG_ID or None,
-            # relationships
             "_profile_id": profile_id,
-            "_nowcerts_id": safe_str(d.get("databaseId")),
-            # extra fields that need notes storage
-            "_dl_status": safe_str(d.get("dlStatus")),
-            "_license_issue_date": parse_date(d.get("licenseIssueDate")),
-            "_radio_operacion": safe_str(d.get("radioOperacion")),
+            "_nowcerts_id": safe_str(d.get("id")),
         }
         result.append(record)
 

@@ -2,13 +2,14 @@
 Maps Nowcerts PolicyDetailList + CLCommercialAutoRatingDetailList
 → Supabase `policy_coverages` table.
 
-Field mapping:
-  lineOfBusiness    → coverage_type
-  limit             → limits  (jsonb: {"limit": value})
-  deductible        → limits  (jsonb: merged {"limit": ..., "deductible": ...})
-  effectiveDate     → effective_date
-  expirationDate    → expiration_date
-  policyNumber      → policy_number
+Verified field names from inspection:
+  PolicyDetailList.databaseId        → _nowcerts_policy_id
+  PolicyDetailList.lineOfBusinesses  → coverage_type (array of objects)
+  PolicyDetailList.number            → policy_number
+  PolicyDetailList.effectiveDate, expirationDate → direct
+
+  CLCommercialAutoRatingDetailList provides detailed limits per coverage type:
+    autoLiabilityLimit, motorTruckCargoLimit, etc.
 """
 from __future__ import annotations
 
@@ -16,10 +17,20 @@ import json
 from typing import Any
 
 from config.settings import TARGET_ORG_ID
-from utils.helpers import safe_str, safe_float, parse_date
+from utils.helpers import safe_str, safe_int, parse_date
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Maps CL auto rating boolean+limit pairs to coverage type names
+_CL_COVERAGE_FIELDS = [
+    ("autoLiability", "autoLiabilityLimit", "Auto Liability"),
+    ("motorTruckCargo", "motorTruckCargoLimit", "Motor Truck Cargo"),
+    ("nonTruckingLiability", "nonTruckingLiabilityLimit", "Non-Trucking Liability"),
+    ("truckersGeneralLiability", "truckersGeneralLiabilityLimit", "Truckers General Liability"),
+    ("trailerInterchange", "trailerInterchangeLimit", "Trailer Interchange"),
+    ("automobilePhysicalDamage", "automobilePhysicalDamageLimit", "Physical Damage"),
+]
 
 
 def transform_policy_coverages(
@@ -27,15 +38,12 @@ def transform_policy_coverages(
     cl_auto_details: list[dict[str, Any]],
     nowcerts_policy_to_folder_carrier: dict[str, str],
 ) -> list[dict[str, Any]]:
-    """
-    nowcerts_policy_to_folder_carrier: {nowcerts_policy_databaseId → supabase insurance_folder_carriers UUID}
-    """
-    # Index CL auto details by policyDatabaseId
-    cl_by_policy: dict[str, list[dict]] = {}
+    # Index CL auto details by insuredDatabaseId (no direct policy FK available)
+    cl_by_insured: dict[str, dict] = {}
     for cl in cl_auto_details:
-        pid = safe_str(cl.get("policyDatabaseId"))
-        if pid:
-            cl_by_policy.setdefault(pid, []).append(cl)
+        iid = safe_str(cl.get("insuredDatabaseId"))
+        if iid:
+            cl_by_insured[iid] = cl
 
     result: list[dict[str, Any]] = []
 
@@ -47,34 +55,57 @@ def transform_policy_coverages(
             logger.warning("PolicyCoverages — no carrier record for policy %s, skipping", nowcerts_pid)
             continue
 
-        lob_raw = pol.get("lineOfBusiness")
+        policy_number = safe_str(pol.get("number"))
+        eff = parse_date(pol.get("effectiveDate"))
+        exp = parse_date(pol.get("expirationDate"))
+
+        # Extract coverage types from lineOfBusinesses
+        lob_raw = pol.get("lineOfBusinesses") or []
         coverage_types: list[str] = []
         if isinstance(lob_raw, list):
-            coverage_types = [safe_str(x) for x in lob_raw if x]
-        elif isinstance(lob_raw, str) and lob_raw.strip():
-            coverage_types = [lob_raw.strip()]
+            for item in lob_raw:
+                if isinstance(item, dict):
+                    name = safe_str(item.get("lineOfBusinessName") or item.get("name"))
+                    if name:
+                        coverage_types.append(name)
 
         if not coverage_types:
             coverage_types = ["General"]
 
-        base_limits = {
-            "limit": safe_float(pol.get("limit")),
-            "deductible": safe_float(pol.get("deductible")),
-        }
+        # Try to get detailed limits from CL auto rating if available
+        insured_id = safe_str(pol.get("insuredDatabaseId"))
+        cl = cl_by_insured.get(insured_id or "")
 
-        for ctype in coverage_types:
-            record: dict[str, Any] = {
-                "coverage_type": ctype,
-                "limits": json.dumps(base_limits),
-                "policy_number": safe_str(pol.get("policyNumber")),
-                "effective_date": parse_date(pol.get("effectiveDate")),
-                "expiration_date": parse_date(pol.get("expirationDate")),
-                "status": "active",
-                "org_id": TARGET_ORG_ID or None,
-                "_carrier_record_id": carrier_id,
-                "_nowcerts_policy_id": nowcerts_pid,
-            }
-            result.append(record)
+        if cl:
+            # Build one coverage record per active CL coverage type
+            for bool_field, limit_field, label in _CL_COVERAGE_FIELDS:
+                if cl.get(bool_field):
+                    limits = {"limit": safe_int(cl.get(limit_field))}
+                    result.append({
+                        "coverage_type": label,
+                        "limits": json.dumps(limits),
+                        "policy_number": policy_number,
+                        "effective_date": eff,
+                        "expiration_date": exp,
+                        "status": "active",
+                        "org_id": TARGET_ORG_ID or None,
+                        "_carrier_record_id": carrier_id,
+                        "_nowcerts_policy_id": nowcerts_pid,
+                    })
+        else:
+            # Fall back to lineOfBusinesses list without specific limits
+            for ctype in coverage_types:
+                result.append({
+                    "coverage_type": ctype,
+                    "limits": json.dumps({}),
+                    "policy_number": policy_number,
+                    "effective_date": eff,
+                    "expiration_date": exp,
+                    "status": "active",
+                    "org_id": TARGET_ORG_ID or None,
+                    "_carrier_record_id": carrier_id,
+                    "_nowcerts_policy_id": nowcerts_pid,
+                })
 
     logger.info("Transformed %d policy_coverages", len(result))
     return result

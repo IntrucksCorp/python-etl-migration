@@ -1,16 +1,12 @@
 """
-Maps Nowcerts InsuredList + PolicyDetailList + PolicyEndorsementDetailList
-→ Supabase `insurance_folders` table.
+Maps Nowcerts InsuredList + PolicyDetailList → Supabase `insurance_folders` table.
 
-One insurance_folder per insured (client). Financial totals come from
-the related PolicyDetailList records.
-
-Field mapping:
-  InsuredList.firstName+lastName   → name (producer_name)
-  PolicyDetailList.premium         → total_premium  (sum)
-  PolicyDetailList.taxesAndFees    → policy_fee
-  PolicyDetailList.agencyFees      → agency_fees
-  EndorsementDetailList.premium    → used for insurance_folder financial rollup
+Verified field names from inspection:
+  InsuredList.id             → _nowcerts_insured_id
+  InsuredList.commercialName → name
+  PolicyDetailList.totalPremium      → total_premium    (not premium)
+  PolicyDetailList.totalNonPremium   → policy_fee       (not taxesAndFees)
+  PolicyDetailList.totalAgencyCommission → agency_fees  (not agencyFees)
 """
 from __future__ import annotations
 
@@ -35,31 +31,27 @@ def transform_insurance_folders(
         if not insured_id:
             continue
         totals = policy_totals.setdefault(insured_id, {"premium": 0.0, "policy_fee": 0.0, "agency_fees": 0.0})
-        totals["premium"] += safe_float(pol.get("premium")) or 0.0
-        totals["policy_fee"] += safe_float(pol.get("taxesAndFees")) or 0.0
-        totals["agency_fees"] += safe_float(pol.get("agencyFees")) or 0.0
+        totals["premium"] += safe_float(pol.get("totalPremium")) or 0.0          # not premium
+        totals["policy_fee"] += safe_float(pol.get("totalNonPremium")) or 0.0    # not taxesAndFees
+        totals["agency_fees"] += safe_float(pol.get("totalAgencyCommission")) or 0.0  # not agencyFees
 
     result: list[dict[str, Any]] = []
 
     for ins in insureds:
-        nowcerts_id = safe_str(ins.get("databaseId") or ins.get("id"))
+        nowcerts_id = safe_str(ins.get("id"))
         profile_id = nowcerts_to_supabase_profile.get(nowcerts_id or "")
 
         if not profile_id:
             continue
 
-        first = safe_str(ins.get("firstName") or "")
-        last = safe_str(ins.get("lastName") or "")
-        name = safe_str(ins.get("companyName")) or " ".join(filter(None, [first, last])) or "Migrated Client"
-
-        totals = policy_totals.get(nowcerts_id or {})
+        name = safe_str(ins.get("commercialName")) or safe_str(ins.get("dba")) or "Migrated Client"
+        totals = policy_totals.get(nowcerts_id or "")
 
         record: dict[str, Any] = {
             "name": name,
             "total_premium": totals["premium"] if totals else None,
             "policy_fee": totals["policy_fee"] if totals else None,
             "agency_fees": totals["agency_fees"] if totals else None,
-            # analyst / agent / producer_name → migrated empty per spec
             "analyst": None,
             "agent": None,
             "producer_name": None,
